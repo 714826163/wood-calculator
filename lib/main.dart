@@ -173,10 +173,10 @@ class _BatchHistoryCardState extends State<BatchHistoryCard> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      '总体积: ${widget.batchItem.totalVolume.toStringAsFixed(4)} 立方米',
+                      '总体积: ${widget.batchItem.totalVolume.toStringAsFixed(3)} 立方米',
                     ),
                     Text(
-                      '总价格: ${widget.batchItem.grandTotalPrice.toStringAsFixed(2)} 元',
+                      '总价格: ${widget.batchItem.grandTotalPrice.toStringAsFixed(3)} 元',
                     ),
                   ],
                 ),
@@ -222,10 +222,10 @@ class _BatchHistoryCardState extends State<BatchHistoryCard> {
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 Text(
-                                  '体积: ${detail['volume'].toStringAsFixed(4)} 立方米',
+                                  '体积: ${detail['volume'].toStringAsFixed(3)} 立方米',
                                 ),
                                 Text(
-                                  '价格: ${detail['totalPrice'].toStringAsFixed(2)} 元',
+                                  '价格: ${detail['totalPrice'].toStringAsFixed(3)} 元',
                                 ),
                               ],
                             ),
@@ -256,13 +256,99 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
   double _totalVolume = 0.0;
   double _grandTotalPrice = 0.0;
   List<BatchHistoryItem> _batchHistory = [];
+  bool _hasUnfinishedData = false;
 
   @override
   void initState() {
     super.initState();
     _loadBatchHistory();
-    // 添加默认的木材项
-    _addWoodItem();
+    _loadUnfinishedData();
+    // 添加默认的木材项（如果没有恢复的数据）
+    if (_woodItems.isEmpty) {
+      _addWoodItem();
+    }
+    // 添加单价控制器监听器
+    _priceController.addListener(_saveUnfinishedData);
+  }
+
+  // 保存未完成的木材数据
+  Future<void> _saveUnfinishedData() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // 保存木材项数据
+    List<String> woodItemsJson = [];
+    for (var item in _woodItems) {
+      woodItemsJson.add(
+        '${item.id}|${item.lengthController.text}|${item.girthController.text}|${item.lengthUnit}|${item.girthUnit}',
+      );
+    }
+    await prefs.setStringList('unfinished_wood_items', woodItemsJson);
+
+    // 保存单价
+    await prefs.setString('unfinished_price', _priceController.text);
+  }
+
+  // 加载未完成的木材数据
+  Future<void> _loadUnfinishedData() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // 加载木材项数据
+    final woodItemsJson = prefs.getStringList('unfinished_wood_items');
+    if (woodItemsJson != null && woodItemsJson.isNotEmpty) {
+      List<WoodItem> loadedItems = [];
+      bool hasValidData = false;
+
+      for (var json in woodItemsJson) {
+        final parts = json.split('|');
+        TextEditingController lengthController = TextEditingController(
+          text: parts[1],
+        );
+        TextEditingController girthController = TextEditingController(
+          text: parts[2],
+        );
+
+        // 检查是否有有效数据
+        if (parts[1].isNotEmpty || parts[2].isNotEmpty) {
+          hasValidData = true;
+        }
+
+        // 添加控制器监听器
+        lengthController.addListener(_saveUnfinishedData);
+        girthController.addListener(_saveUnfinishedData);
+
+        loadedItems.add(
+          WoodItem(
+            id: parts[0],
+            lengthController: lengthController,
+            girthController: girthController,
+            lengthUnit: parts[3],
+            girthUnit: parts[4],
+          ),
+        );
+      }
+
+      setState(() {
+        _woodItems = loadedItems;
+        // 只有当存在有效木材数据时才显示提示
+        _hasUnfinishedData = hasValidData;
+      });
+    }
+
+    // 加载单价
+    final price = prefs.getString('unfinished_price');
+    if (price != null) {
+      _priceController.text = price;
+    }
+  }
+
+  // 清除未完成的木材数据（计算完成后调用）
+  Future<void> _clearUnfinishedData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('unfinished_wood_items');
+    await prefs.remove('unfinished_price');
+    setState(() {
+      _hasUnfinishedData = false;
+    });
   }
 
   Future<void> _loadBatchHistory() async {
@@ -293,16 +379,25 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
   }
 
   void _addWoodItem() {
+    TextEditingController lengthController = TextEditingController();
+    TextEditingController girthController = TextEditingController();
+
+    // 添加控制器监听器
+    lengthController.addListener(_saveUnfinishedData);
+    girthController.addListener(_saveUnfinishedData);
+
     setState(() {
       _woodItems.add(
         WoodItem(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
-          lengthController: TextEditingController(),
-          girthController: TextEditingController(),
+          lengthController: lengthController,
+          girthController: girthController,
           lengthUnit: '米',
           girthUnit: '厘米',
         ),
       );
+      // 保存数据
+      _saveUnfinishedData();
     });
   }
 
@@ -313,18 +408,53 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
       if (_woodItems.isEmpty) {
         _addWoodItem();
       }
+      // 保存数据
+      _saveUnfinishedData();
     });
   }
 
-  double _calculateVolume(double length, double girth) {
-    // 计算直径（周长 / π）
-    double diameter = girth / pi;
-    // 计算半径
-    double radius = diameter / 2;
-    // 计算横截面积
-    double area = pi * radius * radius / 10000; // 转换为平方米
-    // 计算体积
-    return area * length;
+  double _calculateVolume(double length, double diameter) {
+    // 用户输入的"周长"实际上是检尺径（直径D），直接使用
+    // 使用GB/T 4814—2013《原木材积表》中的计算公式
+    if (length >= 0.5 && length <= 1.9) {
+      // 短原木（检尺长 0.5m ~ 1.9m）
+      // 公式(1): V = 0.8 × L × (D + 0.5 × L)² ÷ 10000
+      return 0.8 * length * pow(diameter + 0.5 * length, 2) / 10000;
+    } else if (length >= 2.0 && length <= 10.0) {
+      // 标准长度原木（检尺长 2.0m ~ 10.0m）
+      if (diameter >= 4 && diameter <= 13) {
+        // 小径原木
+        // 公式(2): V = 0.7854 × L × (D + 0.45 × L + 0.2)² ÷ 10000
+        return 0.7854 * length * pow(diameter + 0.45 * length + 0.2, 2) / 10000;
+      } else if (diameter >= 14) {
+        // 大径原木
+        // 公式(3): V = 0.7854 × L × [D + 0.5 × L + 0.005 × L² + 0.000125 × L × (14 - L)² × (D - 10)]² ÷ 10000
+        return 0.7854 *
+            length *
+            pow(
+              diameter +
+                  0.5 * length +
+                  0.005 * pow(length, 2) +
+                  0.000125 * length * pow(14 - length, 2) * (diameter - 10),
+              2,
+            ) /
+            10000;
+      } else {
+        // 直径小于4cm的情况，使用简单圆柱体公式
+        double radius = diameter / 2;
+        double area = pi * radius * radius / 10000;
+        return area * length;
+      }
+    } else if (length >= 10.2) {
+      // 超长原木（检尺长 10.2m以上）
+      // 公式(4): V = 0.8 × L × (D + 0.5 × L)² ÷ 10000
+      return 0.8 * length * pow(diameter + 0.5 * length, 2) / 10000;
+    } else {
+      // 其他情况，使用简单圆柱体公式
+      double radius = diameter / 2;
+      double area = pi * radius * radius / 10000;
+      return area * length;
+    }
   }
 
   void _calculateBatch() {
@@ -336,18 +466,18 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
       // 计算每根木材
       for (var item in _woodItems) {
         double length = double.parse(item.lengthController.text);
-        double girth = double.parse(item.girthController.text);
+        double diameter = double.parse(item.girthController.text);
 
         // 单位转换
+        // L（检尺长）：保持为米
+        // D（检尺径）：保持为厘米（标准要求）
         if (item.lengthUnit == '厘米') {
-          length /= 100;
+          length /= 100; // 将厘米转换为米
         }
-        if (item.girthUnit == '米') {
-          girth *= 100;
-        }
+        // 直径单位已经是厘米，不需要转换
 
         // 计算体积和总价
-        double volume = _calculateVolume(length, girth);
+        double volume = _calculateVolume(length, diameter);
         double totalPrice = volume * price;
 
         // 更新木材项的计算结果
@@ -393,6 +523,9 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
 
         // 保存历史记录
         _saveBatchHistory();
+
+        // 清除未完成的数据
+        _clearUnfinishedData();
       });
     }
   }
@@ -415,6 +548,37 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // 未完成操作提示
+              if (_hasUnfinishedData)
+                Card(
+                  color: Colors.yellow[100],
+                  elevation: 4,
+                  margin: EdgeInsets.only(bottom: 16),
+                  child: Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '检测到未完成的计算操作，是否继续编辑？',
+                          style: TextStyle(color: Colors.black87),
+                        ),
+                        ElevatedButton(
+                          onPressed: () {
+                            // 已经自动加载了数据，这里只需要关闭提示
+                            setState(() {
+                              _hasUnfinishedData = false;
+                            });
+                          },
+                          child: Text('继续编辑'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               Text(
                 '批量计算',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -478,6 +642,8 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
                                 onChanged: (value) {
                                   setState(() {
                                     item.lengthUnit = value!;
+                                    // 保存数据
+                                    _saveUnfinishedData();
                                   });
                                 },
                                 items: ['米', '厘米'].map((unit) {
@@ -523,6 +689,8 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
                                 onChanged: (value) {
                                   setState(() {
                                     item.girthUnit = value!;
+                                    // 保存数据
+                                    _saveUnfinishedData();
                                   });
                                 },
                                 items: ['厘米', '米'].map((unit) {
@@ -544,10 +712,10 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
                                         CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        '体积: ${item.volume!.toStringAsFixed(4)} 立方米',
+                                        '体积: ${item.volume!.toStringAsFixed(3)} 立方米',
                                       ),
                                       Text(
-                                        '总价: ${item.totalPrice!.toStringAsFixed(2)} 元',
+                                        '总价: ${item.totalPrice!.toStringAsFixed(3)} 元',
                                       ),
                                     ],
                                   ),
@@ -632,7 +800,7 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
                             ),
                             SizedBox(height: 12),
                             Text(
-                              '总木材体积: ${_totalVolume.toStringAsFixed(4)} 立方米',
+                              '总木材体积: ${_totalVolume.toStringAsFixed(3)} 立方米',
                               style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,
@@ -640,7 +808,7 @@ class _WoodCalculatorPageState extends State<WoodCalculatorPage> {
                             ),
                             SizedBox(height: 4),
                             Text(
-                              '总价格: ${_grandTotalPrice.toStringAsFixed(2)} 元',
+                              '总价格: ${_grandTotalPrice.toStringAsFixed(3)} 元',
                               style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
